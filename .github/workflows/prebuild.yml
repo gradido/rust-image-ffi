@@ -1,0 +1,176 @@
+# Builds the prebuilt module for every platform and publishes it as a release.
+#
+# It runs when a pull request whose title says "release" is merged and its version is higher than
+# the base branch's and than every tag -- the same check the release gate already ran on the open
+# pull request, run again here because a title can be edited after a green check.
+#
+# What it publishes, per target: rust_image_ffi.o (ELF, Mach-O) or rust_image_ffi.lib (COFF), the header,
+# NATIVE_LIBS.txt with the libraries the caller's link line needs, and SHA256SUMS -- in one
+# archive per target, with a SHA256SUMS over the archives beside them. A consumer pins a version
+# and a hash.
+name: prebuild
+
+on:
+  pull_request:
+    types: [closed]
+  # For a release that has to be rebuilt without another pull request. The version rules still
+  # apply: a version that is already tagged is refused.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prebuild
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merged branch, not the pull request's merge ref: what is released is what is on
+          # the branch, and every job below checks out exactly the commit resolved here.
+          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          fetch-depth: 0
+      - id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          echo "version=$(scripts/release-version.sh version)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = workflow_dispatch ]; then
+            # No base to compare against; the tag rules still hold.
+            scripts/release-version.sh check "release (manual run)" ""
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fails the job when the title says release and the version does not back it up. Not
+          # through a pipe: the exit status of a pipeline is the last command's, and a refused
+          # release would then pass as a skipped build instead of a red job.
+          answer=$(scripts/release-version.sh check "$PR_TITLE" "$BASE_SHA")
+          # The verdict is the last line on stdout; notes and reasons went to stderr and are in
+          # the log above. Taking the last line rather than all of it means a line added to the
+          # script can never turn a release into a skipped build again.
+          answer=$(printf '%s\n' "$answer" | tail -n 1)
+          echo "verdict: $answer"
+          case "$answer" in
+            "release: "*) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    strategy:
+      # One platform failing must not hide what the others would have said.
+      fail-fast: false
+      matrix:
+        # A Rust build for macOS needs the Apple SDK and one for Windows the MSVC toolchain, so
+        # those four rows run on their own operating system. The arm64 runners (ubuntu-22.04-arm,
+        # windows-11-arm) are free for public repositories; on a private one they are billed, and
+        # dropping those two rows leaves x64 working.
+        #
+        # Both macOS artifacts are built on the arm64 runner. The Intel one is cross-compiled
+        # rather than built on macos-13, which GitHub has retired: a job asking for that label
+        # queues until it is cancelled instead of failing. One SDK builds for both architectures,
+        # and what cross means here is only that the smoke test links the object without running
+        # it -- this machine cannot execute it.
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin, cross: true }
+          - { os: windows-2022, target: x86_64-pc-windows-msvc, arch: x64 }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git Bash on the Windows runners, so one script covers every platform.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      # rust-toolchain.toml pins the compiler; this installs exactly that one.
+      - run: rustup show
+      - name: the target, when it is not this machine's
+        if: matrix.cross
+        run: rustup target add ${{ matrix.target }}
+      # llvm-objcopy and llvm-nm of the pinned rustc: scripts/localize.sh weakens one symbol with
+      # them on Mach-O, which Apple's tools cannot do, and reads the object with an LLVM that
+      # understands the bitcode rustc wrote.
+      - name: LLVM tools of the pinned compiler
+        if: runner.os == 'macOS'
+        run: rustup component add llvm-tools
+      # Nothing here needs a network or a second machine, so the whole suite runs everywhere. On
+      # the cross row it tests this machine's build of the same source.
+      - name: tests
+        run: cargo test --release
+      - name: build the prebuild
+        run: scripts/localize.sh ${{ matrix.target }}
+      - name: link it from C and run it
+        if: runner.os != 'Windows'
+        env:
+          # A cross-built object links here and runs nowhere on this machine.
+          SMOKE_LINK_ONLY: ${{ matrix.cross && '1' || '0' }}
+        run: scripts/c-smoke.sh ${{ matrix.target }}
+      - name: link it from C and run it
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i
+          call "%VSPATH%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch }} || exit /b 1
+          set /p NATIVE_LIBS=<dist\${{ matrix.target }}\NATIVE_LIBS.txt
+          rem What rustc printed is for the linker, not for the compiler -- /defaultlib: and the
+          rem import libraries go after /link. /LIBPATH points at the archive, which carries the
+          rem one import library that is not the linker's own.
+          cl /nologo /I dist\${{ matrix.target }} tests\c\smoke.c /Fe:smoke.exe /link /LIBPATH:dist\${{ matrix.target }} dist\${{ matrix.target }}\rust_image_ffi.lib %NATIVE_LIBS% || exit /b 1
+          smoke.exe || exit /b 1
+      - name: package
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          name="rust-image-ffi-$VERSION-$TARGET"
+          mv "dist/$TARGET" "dist/$name"
+          tar -czf "$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: rust-image-ffi-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: one list of hashes over the archives
+        run: cd release && sha256sum ./*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          set -eu
+          gh release create "v$VERSION" release/*.tar.gz release/SHA256SUMS \
+            --target "$SHA" --title "v$VERSION" --generate-notes

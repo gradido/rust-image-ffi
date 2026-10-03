@@ -1,0 +1,35 @@
+[package]
+name = "rust-image-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["einhornimmond <info@einhornimmond.de>"]
+description = "image-rs behind a C interface: decode an untrusted picture under hard limits and encode it again, so that nothing but pixels gets through"
+license = "Apache-2.0"
+repository = "https://github.com/gradido/rust-image-ffi"
+publish = false
+
+[lib]
+name = "rust_image_ffi"
+# staticlib is what gets localized into rust_image_ffi.o (scripts/localize.sh), cdylib is for
+# callers that prefer a shared library, rlib is what the Rust tests link.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# Pinned exactly: the decoders are the attack surface of this module, so a version is raised
+# deliberately, with the tests green -- never by a lockfile update. Only the formats the header
+# names are compiled in; every further decoder is more code that reads hostile bytes.
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[profile.release]
+# As in libp2p-ffi. panic must stay "unwind": a panic has to come back through the boundary as
+# RIMG_ERR_PANIC, not end the host.
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+panic = "unwind"
+strip = true
+
+[profile.test]
+# The decoders are slow enough unoptimized that the limit tests would crawl.
+opt-level = 1
