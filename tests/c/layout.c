@@ -20,6 +20,7 @@ int main(void)
     OFF(rimg_options, jpeg_quality);
     OFF(rimg_options, apply_orientation);
     OFF(rimg_options, background);
+    OFF(rimg_options, jpeg_subsampling);
     SIZE(rimg_info);
     OFF(rimg_info, width);
     OFF(rimg_info, height);

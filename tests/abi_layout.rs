@@ -81,6 +81,10 @@ fn rust_and_c_agree_on_every_layout() {
             "offsetof.rimg_options.background",
             offset_of!(rimg_options, background),
         ),
+        (
+            "offsetof.rimg_options.jpeg_subsampling",
+            offset_of!(rimg_options, jpeg_subsampling),
+        ),
         ("sizeof.rimg_info", size_of::<rimg_info>()),
         ("offsetof.rimg_info.width", offset_of!(rimg_info, width)),
         ("offsetof.rimg_info.height", offset_of!(rimg_info, height)),

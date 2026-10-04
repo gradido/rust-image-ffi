@@ -52,6 +52,41 @@ What it does, in this order:
    JPEG and kept for PNG. 16 bit becomes 8.
 5. The pixels are encoded, as JPEG or PNG.
 
+## How large the result is
+
+Re-encoding does not make a picture larger by itself; the settings do. Measured on an 800 x 600
+picture that came in as a 26.4 KB JPEG of quality 60 with color at half resolution (4:2:0), which
+is what browsers and cameras write:
+
+```text
+jpeg_quality    0.1.1, 4:2:0 (default)    0.1.1, 4:4:4    0.1.0     libjpeg, 4:2:0, optimized
+85              33.1 KB                   53.9 KB         61.7 KB   33.4 KB
+75              30.6 KB                   44.0 KB         49.3 KB   30.7 KB
+60              26.4 KB                   35.3 KB         40.8 KB   26.4 KB
+50              25.6 KB                   32.4 KB         38.2 KB   25.5 KB
+```
+
+- **At the source's quality the picture keeps its size**: 26.4 KB in, 26.4 KB out, and the same
+  again on a second pass.
+- **A quality above the source's buys nothing**: 85 for a picture that was stored at 60 keeps its
+  artifacts more precisely, at a quarter more bytes. A caller that knows what its clients send
+  asks for that quality.
+- **0.1.0 was half again as large.** It encoded with image-rs's own encoder, which stores color at
+  full resolution and uses the standard Huffman tables. Since 0.1.1 the JPEG encoder is
+  [mozjpeg](https://github.com/mozilla/mozjpeg), Mozilla's fork of libjpeg-turbo, through the
+  `mozjpeg` crate -- set to do what libjpeg-turbo does, which is why the last column matches:
+  a baseline JPEG in one interleaved scan, 4:2:0 by default (`jpeg_subsampling = 0` for full
+  resolution), Huffman tables built for the picture. mozjpeg's own defaults, progressive scans and
+  trellis quantization, are left off.
+- **Why C in a module that is about memory safety.** An encoder only ever sees pixels this module
+  decoded, never the sender's bytes; what reads hostile input is still Rust alone. And the
+  pure-Rust encoder that was tried first, `jpeg-encoder`, can build its Huffman tables only by
+  writing one scan per component -- a file that zune-jpeg 0.5.15, the decoder this module reads
+  JPEGs with, gets the colors of wrong, where libjpeg, ffmpeg and stb read it right
+  (`compare/stb/findings/zune-miscolors-noninterleaved-420.jpg` is one). A picture goes through
+  this module on the sending server and again on the receiving one, so it has to read what it
+  writes; `tests/reencode.rs` holds it to that.
+
 ## What it does not protect against
 
 - **What the pixels show.** A picture of something unwanted is still that picture.
@@ -109,8 +144,10 @@ release does not build while it fails.
 `fuzz/run.sh` is the check before a release that changes a decoder: every format allowed, both
 encoders, through `rimg_reencode` and `rimg_probe`, with AddressSanitizer watching the `unsafe`
 that the decoders' SIMD code needs. It is the one thing here that needs a nightly compiler, and
-it is not part of CI: a run is half an hour on eight cores. The last one, on 2026-10-04 against
-image-rs 0.25.10: 34 million inputs on 28 workers, no finding.
+it is not part of CI: a run is half an hour on eight cores. With a clang at hand the C encoder is
+built with AddressSanitizer too. The last runs, on 2026-10-04 on 28 workers, without a finding:
+34 million inputs in half an hour against 0.1.0's encoder, and 4.6 million new inputs in ten
+minutes after the change to mozjpeg.
 
 ## What ships: a localized object
 
@@ -125,9 +162,17 @@ no partial link, and macOS exports `_rust_eh_personality` as a weak symbol.
 Linux `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`. `panic` stays `"unwind"` in the release
 profile, or a panic would end the host instead of answering `RIMG_ERR_PANIC`.
 
-Size, measured on x86_64 Linux: the object is 2.3 MB; `tests/c/smoke.c` linked against it with
-`--gc-sections` and stripped is 0.9 MB. (Release 0.1.0 shipped 12 MB: it built the crate's other
-crate types along with the staticlib, and that kept fat LTO from applying to it.)
+Size, measured on x86_64 Linux: the object is 2.7 MB; `tests/c/smoke.c` linked against it with
+`--gc-sections` and stripped is 1.2 MB, of which the C encoder is 0.3 MB. (Release 0.1.0 shipped
+12 MB: it built the crate's other crate types along with the staticlib, and that kept fat LTO from
+applying to it.)
+
+The C in it, the encoder, is compiled with zig for every target except MSVC's -- the compiler
+gradido's shared-native builds its own C with, the same on every runner, with no toolchain to
+install per target. `scripts/localize.sh` takes it from PATH, from where shared-native keeps its
+own, or from `pip install ziglang`. The `*-windows-msvc` archives are for callers on MSVC's
+toolchain and are built with `cl`. Without zig, a build for this machine falls back to `cc` and
+says so; a release does not.
 
 What a release holds, one archive per target:
 
@@ -159,9 +204,9 @@ Not done here; what the build there has to settle:
   gnu ABI -- takes `*-pc-windows-gnullvm`, not MSVC's. `detectTargetTriple` there also answers
   32-bit x86 and arm; for those there is no prebuild.
 - **The byte budgets.** `CHAT_IMAGE_MAX_BYTES` and `AVATAR_*_MAX_BYTES` bound what the browser
-  sends. The re-encoded picture is a different size -- larger, when the browser encoded below the
-  quality asked for here. Passing the budget as `out_cap` makes that an answer
-  (`RIMG_ERR_BUFFER_TOO_SMALL`) the caller can retry at a lower `jpeg_quality` or refuse.
+  sends. The re-encoded picture is a different size; see *How large the result is*. Passing the
+  budget as `out_cap` makes that an answer (`RIMG_ERR_BUFFER_TOO_SMALL`) the caller can retry at
+  a lower `jpeg_quality` or refuse.
 - **Width and height.** A chat picture's size is what the sender says today. `rimg_info` says what
   it is.
 
@@ -177,4 +222,6 @@ output and in the build.
 
 ## License
 
-Apache-2.0
+Apache-2.0. The JPEG encoder it links, mozjpeg, is under the IJG license, the BSD 3-clause
+license of libjpeg-turbo and the zlib license: this software is based in part on the work of the
+Independent JPEG Group.

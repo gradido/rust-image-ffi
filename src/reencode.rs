@@ -8,10 +8,11 @@
 
 use std::io::Cursor;
 
-use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::error::{ImageError, LimitErrorKind};
 use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, RgbImage};
+
+use mozjpeg::ColorSpace as JpegColor;
 
 use crate::abi::*;
 
@@ -94,6 +95,7 @@ pub struct Config {
     pub max_pixels: Option<u64>,
     pub max_alloc_bytes: Option<u64>,
     pub jpeg_quality: u8,
+    pub jpeg_subsampling: bool,
     pub apply_orientation: bool,
     pub background: [u8; 3],
 }
@@ -120,6 +122,7 @@ impl Config {
             max_pixels: (o.max_pixels != 0).then_some(o.max_pixels),
             max_alloc_bytes: (o.max_alloc_bytes != 0).then_some(o.max_alloc_bytes),
             jpeg_quality: o.jpeg_quality,
+            jpeg_subsampling: o.jpeg_subsampling != 0,
             apply_orientation: o.apply_orientation != 0,
             background: o.background,
         })
@@ -190,14 +193,31 @@ pub fn reencode(cfg: &Config, input: &[u8]) -> Result<(Vec<u8>, rimg_info), Erro
     match cfg.output {
         Format::Jpeg => {
             // JPEG is 8 bit, gray or RGB, without alpha.
-            let image = if color.has_alpha() {
-                DynamicImage::ImageRgb8(flatten(&image, cfg.background))
+            if color.has_alpha() {
+                encode_jpeg(
+                    cfg,
+                    &mut out,
+                    flatten(&image, cfg.background).as_raw(),
+                    size,
+                    JpegColor::JCS_RGB,
+                )
             } else if color.has_color() {
-                DynamicImage::ImageRgb8(image.into_rgb8())
+                encode_jpeg(
+                    cfg,
+                    &mut out,
+                    image.into_rgb8().as_raw(),
+                    size,
+                    JpegColor::JCS_RGB,
+                )
             } else {
-                DynamicImage::ImageLuma8(image.into_luma8())
-            };
-            image.write_with_encoder(JpegEncoder::new_with_quality(&mut out, cfg.jpeg_quality))
+                encode_jpeg(
+                    cfg,
+                    &mut out,
+                    image.into_luma8().as_raw(),
+                    size,
+                    JpegColor::JCS_GRAYSCALE,
+                )
+            }
         }
         Format::Png => {
             // 8 bit per channel whatever came in: 16 bit and float double the size for nothing a
@@ -208,13 +228,61 @@ pub fn reencode(cfg: &Config, input: &[u8]) -> Result<(Vec<u8>, rimg_info), Erro
                 (false, true) => DynamicImage::ImageLumaA8(image.into_luma_alpha8()),
                 (false, false) => DynamicImage::ImageLuma8(image.into_luma8()),
             };
-            image.write_with_encoder(PngEncoder::new(&mut out))
+            image
+                .write_with_encoder(PngEncoder::new(&mut out))
+                .map_err(|_| Error::Encode)
         }
-        Format::WebP => return Err(Error::InvalidArgument),
-    }
-    .map_err(|_| Error::Encode)?;
+        Format::WebP => Err(Error::InvalidArgument),
+    }?;
 
     Ok((out, info(format, size, color)))
+}
+
+/// Not image-rs's own JPEG encoder: that one stores color at full resolution and uses the
+/// standard Huffman tables, and a picture that went through it came out half again as large as
+/// it went in at the same quality. This is mozjpeg, set to do what libjpeg-turbo does: a baseline
+/// JPEG in one interleaved scan, color at half resolution the way cameras and browsers store it
+/// (4:2:0), Huffman tables built for the picture. mozjpeg's own defaults -- progressive scans,
+/// trellis quantization -- are left off: they are smaller still, and they are a different answer
+/// to "quality 60" than every other libjpeg gives.
+///
+/// An encoder only ever sees pixels, so the C is not part of what reads hostile bytes.
+fn encode_jpeg(
+    cfg: &Config,
+    out: &mut Vec<u8>,
+    pixels: &[u8],
+    (width, height): (u32, u32),
+    color: JpegColor,
+) -> Result<(), Error> {
+    // libjpeg's limit for each side.
+    if width == 0 || height == 0 || width > 65500 || height > 65500 {
+        return Err(Error::Encode);
+    }
+    let encode = || -> std::io::Result<Vec<u8>> {
+        let mut compress = mozjpeg::Compress::new(color);
+        compress.set_fastest_defaults();
+        compress.set_size(width as usize, height as usize);
+        compress.set_quality(cfg.jpeg_quality as f32);
+        compress.set_optimize_coding(true);
+        // A gray picture has no color components to subsample.
+        if color == JpegColor::JCS_RGB {
+            let pixels_per_sample = if cfg.jpeg_subsampling { (2, 2) } else { (1, 1) };
+            compress.set_chroma_sampling_pixel_sizes(pixels_per_sample, pixels_per_sample);
+        }
+        let mut started = compress.start_compress(Vec::new())?;
+        started.write_scanlines(pixels)?;
+        started.finish()
+    };
+    // libjpeg reports an error by not returning, and the wrapper turns that into a panic that
+    // unwinds through the C frames. Caught here, so that it is an encoding error and not
+    // RIMG_ERR_PANIC.
+    match std::panic::catch_unwind(encode) {
+        Ok(Ok(encoded)) => {
+            *out = encoded;
+            Ok(())
+        }
+        _ => Err(Error::Encode),
+    }
 }
 
 /// Lays the picture over an opaque background. Dropping the alpha channel instead would show

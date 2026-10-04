@@ -99,20 +99,20 @@ jobs:
         # and what cross means here is only that the smoke test links the object without running
         # it -- this machine cannot execute it.
         include:
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-14, target: x86_64-apple-darwin, cross: true }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, zig: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, zig: true }
+          - { os: macos-14, target: aarch64-apple-darwin, zig: true }
+          - { os: macos-14, target: x86_64-apple-darwin, cross: true, zig: true }
           - { os: windows-2022, target: x86_64-pc-windows-msvc, arch: x64 }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc, arch: arm64 }
-          # musl, for Alpine: built on the glibc runner of the same architecture -- a staticlib
-          # needs no linker -- and proven in an Alpine container with Alpine's own cc.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl, add_target: true }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, add_target: true }
-          # MinGW. -gnu is for mingw-w64's gcc, which the runner has; -gnullvm is for zig and
-          # llvm-mingw, which bring libunwind instead of libgcc, and is the only MinGW target
-          # there is for arm64. zig comes from pip.
-          - { os: windows-2022, target: x86_64-pc-windows-gnu, add_target: true, mingw: true }
+          # musl, for Alpine: built on the glibc runner of the same architecture, the C in it
+          # with zig, and proven in an Alpine container with Alpine's own cc.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl, add_target: true, zig: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, add_target: true, zig: true }
+          # MinGW. -gnu is for mingw-w64's gcc, which the runner has and the smoke test links
+          # with; -gnullvm is for zig and llvm-mingw, which bring libunwind instead of libgcc,
+          # and is the only MinGW target there is for arm64.
+          - { os: windows-2022, target: x86_64-pc-windows-gnu, add_target: true, mingw: true, zig: true }
           - { os: windows-2022, target: x86_64-pc-windows-gnullvm, add_target: true, mingw: true, zig: true }
           - { os: windows-11-arm, target: aarch64-pc-windows-gnullvm, add_target: true, mingw: true, zig: true }
     runs-on: ${{ matrix.os }}
@@ -137,14 +137,25 @@ jobs:
         run: rustup component add llvm-tools
       # Nothing here needs a network or a second machine, so the whole suite runs everywhere. On
       # the cross row it tests this machine's build of the same source.
+      # The JPEG encoder is C, and zig compiles it for every target but MSVC's, which cl builds:
+      # one compiler on every runner, the version shared-native builds with, from pip rather than
+      # from an action of a third party. scripts/localize.sh and scripts/c-smoke.sh find it as
+      # `python -m ziglang`. The second attempt is for a Python that refuses to install into
+      # itself.
+      - name: zig, the C compiler
+        if: matrix.zig
+        run: |
+          python3 -m pip install ziglang==0.15.2 ||
+            python3 -m pip install --break-system-packages ziglang==0.15.2 ||
+            python -m pip install ziglang==0.15.2
       - name: tests
         run: cargo test --locked --release
       - name: build the prebuild
+        env:
+          # No falling back to the runner's cc: what a release is built with is not left to
+          # whether an installation worked.
+          RIMG_REQUIRE_ZIG: ${{ matrix.zig && '1' || '0' }}
         run: scripts/localize.sh ${{ matrix.target }}
-      # The version shared-native builds with. scripts/c-smoke.sh finds it as `python -m ziglang`.
-      - name: zig, for the targets that are linked with it
-        if: matrix.zig
-        run: python -m pip install ziglang==0.15.2
       - name: link it from C and run it
         if: runner.os != 'Windows' || matrix.mingw
         env:

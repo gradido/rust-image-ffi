@@ -301,6 +301,60 @@ fn a_buffer_too_small_says_what_is_needed_and_stays_untouched() {
 }
 
 #[test]
+fn color_is_stored_at_half_resolution_unless_asked_otherwise() {
+    // Noise in the color, which is what subsampling saves on.
+    let image = RgbImage::from_fn(96, 96, |x, y| {
+        Rgb([
+            (x * 37 % 256) as u8,
+            (y * 91 % 256) as u8,
+            ((x + y) * 53 % 256) as u8,
+        ])
+    });
+    let mut input = Vec::new();
+    image
+        .write_with_encoder(JpegEncoder::new_with_quality(&mut input, 95))
+        .unwrap();
+
+    let (subsampled, _) = ok(&options(), &input);
+    let mut opt = options();
+    opt.jpeg_subsampling = 0;
+    let (full, _) = ok(&opt, &input);
+    assert!(
+        subsampled.len() < full.len(),
+        "{} against {}",
+        subsampled.len(),
+        full.len()
+    );
+
+    // The sampling factors are in the frame header: marker ffc0, then length (2), precision (1),
+    // height (2), width (2), components (1), and per component id (1), factors (1), table (1).
+    let factors = |jpeg: &[u8]| {
+        let at = jpeg.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+        jpeg[at + 11]
+    };
+    assert_eq!(factors(&subsampled), 0x22);
+    assert_eq!(factors(&full), 0x11);
+    for out in [&subsampled, &full] {
+        assert_eq!(image::load_from_memory(out).unwrap().dimensions(), (96, 96));
+    }
+}
+
+#[test]
+fn gray_stays_gray() {
+    let image = image::GrayImage::from_fn(40, 30, |x, _| image::Luma([(x * 6) as u8]));
+    let mut input = Vec::new();
+    image
+        .write_with_encoder(JpegEncoder::new_with_quality(&mut input, 90))
+        .unwrap();
+    let (out, info) = ok(&options(), &input);
+    assert_eq!((info.width, info.height), (40, 30));
+    assert_eq!(
+        image::load_from_memory(&out).unwrap().color(),
+        image::ColorType::L8
+    );
+}
+
+#[test]
 fn the_output_may_overwrite_the_input() {
     let input = jpeg(48, 48);
     let (expected, _) = ok(&options(), &input);

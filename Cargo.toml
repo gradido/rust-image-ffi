@@ -20,6 +20,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # deliberately, with the tests green -- never by a lockfile update. Only the formats the header
 # names are compiled in; every further decoder is more code that reads hostile bytes.
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+# The JPEG encoder: mozjpeg, Mozilla's fork of libjpeg-turbo, in C, through its Rust wrapper. Used
+# as libjpeg-turbo would behave (see src/reencode.rs). An encoder only ever sees pixels, so the C
+# is not part of what reads hostile bytes. Without the default features: they want nasm for the
+# SIMD code, and encoding is not what takes the time here.
+mozjpeg = { version = "=0.10.13", default-features = false }
 
 [profile.release]
 # As in libp2p-ffi. panic must stay "unwind": a panic has to come back through the boundary as

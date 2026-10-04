@@ -19,8 +19,16 @@ build   what the prebuild archive holds and what the caller's link line needs.
 
 Not released yet.
 
-- **ABI** unchanged.
-- **output** unchanged; the same image-rs.
+- **ABI** One field more at the end of `rimg_options`: `jpeg_subsampling`, non-zero by default.
+  It took a byte that was padding, so `sizeof(rimg_options)` is what it was. A caller compiled
+  against 0.1.0 that fills the struct with `rimg_options_default` gets the new default; one that
+  fills it by hand has a zero there and gets what 0.1.0 wrote.
+- **output** **JPEGs come out a third smaller, and are different bytes.** The JPEG encoder is
+  now mozjpeg (the `mozjpeg` crate 0.10.13, pinned), set to behave as libjpeg-turbo does, instead
+  of image-rs's own: color at half resolution (4:2:0) unless `jpeg_subsampling` is 0, and Huffman
+  tables built for the picture. A JPEG re-encoded at the quality it came in with keeps its size.
+  What is accepted and what is refused has not changed: the decoders are the same image-rs
+  0.25.10. PNG output is unchanged.
 - **build** Five more targets: `x86_64-` and `aarch64-unknown-linux-musl` for Alpine,
   `x86_64-pc-windows-gnu` for mingw-w64's gcc, `x86_64-` and `aarch64-pc-windows-gnullvm` for zig
   and llvm-mingw. The MinGW archives hold `librust_image_ffi.a`, the staticlib, as MSVC's hold the
@@ -28,6 +36,10 @@ Not released yet.
   The objects are a fifth of the size they were (2.3 MB instead of 12 MB on x86_64 Linux): the
   release build now makes the staticlib alone, and fat LTO applies to it. Same interface, same
   link line.
+  **The module now contains C**, the encoder, compiled with zig 0.15.2 for every target except
+  `*-windows-msvc`, which `cl` builds. Nothing changes on the caller's link line. On
+  Windows, where the staticlib ships as it is, libjpeg's `jpeg_*` symbols are visible in it: a
+  caller that links another libjpeg statically into the same binary has to choose one.
   Releases build with `--locked` and only when `cargo audit` finds no known vulnerability in a
   dependency.
 
