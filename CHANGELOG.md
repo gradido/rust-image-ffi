@@ -15,9 +15,7 @@ output  what a given input turns into: which pictures are refused, and the bytes
 build   what the prebuild archive holds and what the caller's link line needs.
 ```
 
-## 0.1.1
-
-Not released yet.
+## 0.2.0
 
 - **ABI** One field more at the end of `rimg_options`: `jpeg_subsampling`, non-zero by default.
   It took a byte that was padding, so `sizeof(rimg_options)` is what it was. A caller compiled

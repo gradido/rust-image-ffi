@@ -59,7 +59,7 @@ picture that came in as a 26.4 KB JPEG of quality 60 with color at half resoluti
 is what browsers and cameras write:
 
 ```text
-jpeg_quality    0.1.1, 4:2:0 (default)    0.1.1, 4:4:4    0.1.0     libjpeg, 4:2:0, optimized
+jpeg_quality    0.2.0, 4:2:0 (default)    0.2.0, 4:4:4    0.1.0     libjpeg, 4:2:0, optimized
 85              33.1 KB                   53.9 KB         61.7 KB   33.4 KB
 75              30.6 KB                   44.0 KB         49.3 KB   30.7 KB
 60              26.4 KB                   35.3 KB         40.8 KB   26.4 KB
@@ -72,7 +72,7 @@ jpeg_quality    0.1.1, 4:2:0 (default)    0.1.1, 4:4:4    0.1.0     libjpeg, 4:2
   artifacts more precisely, at a quarter more bytes. A caller that knows what its clients send
   asks for that quality.
 - **0.1.0 was half again as large.** It encoded with image-rs's own encoder, which stores color at
-  full resolution and uses the standard Huffman tables. Since 0.1.1 the JPEG encoder is
+  full resolution and uses the standard Huffman tables. Since 0.2.0 the JPEG encoder is
   [mozjpeg](https://github.com/mozilla/mozjpeg), Mozilla's fork of libjpeg-turbo, through the
   `mozjpeg` crate -- set to do what libjpeg-turbo does, which is why the last column matches:
   a baseline JPEG in one interleaved scan, 4:2:0 by default (`jpeg_subsampling = 0` for full
