@@ -2,7 +2,8 @@
 //! header and holds both layouts to each other.
 #![allow(non_camel_case_types)]
 
-pub const RIMG_ABI_VERSION: u32 = 1;
+/// Moves with every change to the header that a compiled caller would notice.
+pub const RIMG_ABI_VERSION: u32 = 4;
 
 pub const RIMG_OK: i32 = 0;
 pub const RIMG_ERR_INVALID_ARGUMENT: i32 = -1;
@@ -21,7 +22,6 @@ pub const RIMG_FORMAT_WEBP: u32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct rimg_options {
-    pub struct_size: u32,
     pub input_formats: u32,
     pub output_format: u32,
     pub max_width: u32,
@@ -32,6 +32,7 @@ pub struct rimg_options {
     pub apply_orientation: u8,
     pub background: [u8; 3],
     pub jpeg_subsampling: u8,
+    pub jpeg_quality_from_input: u8,
 }
 
 #[repr(C)]
@@ -41,11 +42,11 @@ pub struct rimg_info {
     pub width: u32,
     pub height: u32,
     pub has_alpha: u8,
+    pub input_jpeg_quality: u8,
 }
 
 pub fn default_options() -> rimg_options {
     rimg_options {
-        struct_size: size_of::<rimg_options>() as u32,
         input_formats: RIMG_FORMAT_JPEG,
         output_format: RIMG_FORMAT_JPEG,
         max_width: 8192,
@@ -56,5 +57,6 @@ pub fn default_options() -> rimg_options {
         apply_orientation: 1,
         background: [255, 255, 255],
         jpeg_subsampling: 1,
+        jpeg_quality_from_input: 1,
     }
 }

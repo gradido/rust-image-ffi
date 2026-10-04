@@ -24,23 +24,15 @@ unsafe fn bytes<'a>(p: *const u8, len: usize) -> Result<&'a [u8], i32> {
     Ok(unsafe { std::slice::from_raw_parts(p, len) })
 }
 
-/// The defaults, overlaid with as many bytes as the caller's struct has: an older caller's
-/// shorter struct leaves the fields it does not know at their defaults.
-unsafe fn options(opt: *const rimg_options) -> Result<rimg_options, i32> {
-    let mut o = default_options();
+/// The caller's options, or the defaults for a null pointer.
+unsafe fn options(opt: *const rimg_options) -> rimg_options {
     if opt.is_null() {
-        return Ok(o);
+        return default_options();
     }
-    // SAFETY: every rimg_options starts with its own size, and the caller owns at least that.
-    let size = unsafe { opt.cast::<u32>().read_unaligned() } as usize;
-    if size < size_of::<u32>() {
-        return Err(RIMG_ERR_INVALID_ARGUMENT);
-    }
-    let size = size.min(size_of::<rimg_options>());
-    // SAFETY: `size` bytes are readable by the line above and fit `o`; every field is a plain
-    // integer, so any bytes are a valid value.
-    unsafe { std::ptr::copy_nonoverlapping(opt.cast::<u8>(), (&raw mut o).cast::<u8>(), size) };
-    Ok(o)
+    // SAFETY: a non-null `opt` points to a `rimg_options` as this version of the header declares
+    // it; every field is a plain integer, so any bytes are a valid value. Unaligned, because
+    // nothing here checks where the caller put it.
+    unsafe { opt.read_unaligned() }
 }
 
 #[unsafe(no_mangle)]
@@ -99,7 +91,7 @@ pub unsafe extern "C" fn rimg_probe(input: *const u8, in_len: usize, info: *mut 
 }
 
 /// # Safety
-/// `opt` is null or points to a `rimg_options` of `struct_size` bytes, `input` to `in_len`
+/// `opt` is null or points to a `rimg_options`, `input` to `in_len`
 /// readable bytes, `out` to `out_cap` writable bytes, `out_len` to a writable `size_t`, and `info`
 /// is null or points to a writable `rimg_info`.
 #[unsafe(no_mangle)]
@@ -122,7 +114,7 @@ pub unsafe extern "C" fn rimg_reencode(
             return RIMG_ERR_INVALID_ARGUMENT;
         }
         let run = || -> Result<(Vec<u8>, rimg_info), i32> {
-            let cfg = Config::from_options(&unsafe { options(opt)? }).map_err(|e| e.status())?;
+            let cfg = Config::from_options(&unsafe { options(opt) }).map_err(|e| e.status())?;
             reencode::reencode(&cfg, unsafe { bytes(input, in_len)? }).map_err(|e| e.status())
         };
         let (encoded, found) = match run() {

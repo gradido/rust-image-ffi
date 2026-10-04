@@ -21,7 +21,7 @@ bytes it may cost are the caller's.
 
 ```c
 rimg_options opt;
-rimg_options_default(&opt);            /* JPEG in, JPEG out, 8192 x 8192, 16 MP, quality 85 */
+rimg_options_default(&opt);            /* JPEG in, JPEG out, 8192 x 8192, 16 MP, quality 85 at most */
 opt.max_width = opt.max_height = 4096;
 opt.max_pixels = 500000;
 
@@ -29,10 +29,16 @@ uint8_t out[35 * 1024];                /* the byte budget is the size of the buf
 size_t out_len;
 rimg_info info;
 int32_t status = rimg_reencode(&opt, in, in_len, out, sizeof(out), &out_len, &info);
-/* RIMG_OK: out[0..out_len] is what gets stored, info.width/height are what it really is.
+/* RIMG_OK: out[0..out_len] is what gets stored, info.width/height are what it really is,
+ * info.input_jpeg_quality the quality it came in with.
  * RIMG_ERR_BUFFER_TOO_SMALL: over budget at this quality; out_len says by how much.
  * RIMG_ERR_UNSUPPORTED, _DECODE, _LIMIT: refused. rimg_status_string(status) for the log. */
 ```
+
+**The ABI is not stable.** Structs and defaults change between versions; a prebuild and the
+header in its archive belong together. Moving to another version means reading
+[`CHANGELOG.md`](CHANGELOG.md), adapting the caller where it says so, and recompiling.
+`rimg_abi_version() == RIMG_ABI_VERSION` at start tells a mismatch of the two.
 
 No handle, no state, no buffer the caller frees. Every function is thread-safe; a panic is caught
 at the boundary and becomes `RIMG_ERR_PANIC`. `rimg_reencode` is CPU work for the length of the
@@ -69,8 +75,14 @@ jpeg_quality    0.2.0, 4:2:0 (default)    0.2.0, 4:4:4    0.1.0     libjpeg, 4:2
 - **At the source's quality the picture keeps its size**: 26.4 KB in, 26.4 KB out, and the same
   again on a second pass.
 - **A quality above the source's buys nothing**: 85 for a picture that was stored at 60 keeps its
-  artifacts more precisely, at a quarter more bytes. A caller that knows what its clients send
-  asks for that quality.
+  artifacts more precisely, at a quarter more bytes. So the module does not do it. It reads the
+  quality a JPEG was written with from its quantization tables (`src/quality.rs`), reports it as
+  `rimg_info.input_jpeg_quality`, and encodes at the lower of that and `jpeg_quality` -- unless
+  `jpeg_quality_from_input` is 0. `jpeg_quality` is then a bound: this picture, with the defaults,
+  comes out at quality 60 and 26.4 KB. A JPEG stores no quality, only tables; for files from
+  libjpeg and browsers the number is exact (32 of 32 against ImageMagick-written files), for
+  tables of an encoder's own it is the nearest standard quality (ffmpeg's: 85, where ImageMagick
+  estimates 83).
 - **0.1.0 was half again as large.** It encoded with image-rs's own encoder, which stores color at
   full resolution and uses the standard Huffman tables. Since 0.2.0 the JPEG encoder is
   [mozjpeg](https://github.com/mozilla/mozjpeg), Mozilla's fork of libjpeg-turbo, through the
@@ -109,6 +121,7 @@ Of an animated PNG or WebP only the first frame is taken. There is no scaling.
 include/rust_image_ffi.h    the interface
 src/ffi.rs                  the extern "C" functions; the only module allowed unsafe
 src/reencode.rs             sniff, limits, decode, orientation, encode -- safe Rust over slices
+src/quality.rs              the quality a JPEG was written with, from its quantization tables
 src/abi.rs                  the C types, field for field, and the defaults
 scripts/localize.sh         release build -> dist/<target>/ the object, .h, NATIVE_LIBS.txt, SHA256SUMS
 scripts/c-smoke.sh          links tests/c/smoke.c against that object with cc and zig cc

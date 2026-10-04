@@ -15,8 +15,12 @@
  * frees. A panic is caught at the boundary and becomes RIMG_ERR_PANIC -- unwinding into C is
  * undefined behavior.
  *
- * The interface only grows. New fields go at the end of rimg_options, new formats and status
- * codes get new numbers, and nothing is renamed, renumbered or reused. rimg_info is frozen.
+ * The ABI is not stable. Structs, defaults and functions may change with any version: this
+ * header and the module in the same archive belong together, and whoever moves to another
+ * version reads CHANGELOG.md, adapts the calling code where it says so, and recompiles.
+ * RIMG_ABI_VERSION changes whenever the header does in a way a compiled caller would notice; a
+ * caller that compares it with rimg_abi_version() at start finds a header and a module that do
+ * not belong together before a picture does.
  */
 #ifndef RUST_IMAGE_FFI_H
 #define RUST_IMAGE_FFI_H
@@ -28,7 +32,7 @@
 extern "C" {
 #endif
 
-#define RIMG_ABI_VERSION 1
+#define RIMG_ABI_VERSION 4
 
 /* Status codes. */
 #define RIMG_OK 0
@@ -52,10 +56,9 @@ extern "C" {
 #define RIMG_FORMAT_PNG 2u
 #define RIMG_FORMAT_WEBP 4u /* input only: image-rs encodes WebP lossless only */
 
+/* Filled by rimg_options_default, then changed where the caller wants something else: a struct
+ * set up any other way misses whatever a later version adds. */
 typedef struct rimg_options {
-    /* sizeof(rimg_options) as the caller compiled it. A newer module reads the fields the caller
-     * knows and defaults the rest. rimg_options_default sets it. */
-    uint32_t struct_size;
     /* Which formats may come in, RIMG_FORMAT_* or'ed. Default: JPEG only -- every format allowed
      * is one more decoder that reads hostile bytes. */
     uint32_t input_formats;
@@ -68,7 +71,8 @@ typedef struct rimg_options {
     uint64_t max_pixels;
     /* What decoding may allocate for pixels. Default 128 MiB; 0 means no limit. */
     uint64_t max_alloc_bytes;
-    /* 1..100, default 85. Only for JPEG output. */
+    /* 1..100, default 85. Only for JPEG output. With jpeg_quality_from_input, which is the
+     * default, it is the highest quality that is used rather than the one that always is. */
     uint8_t jpeg_quality;
     /* Non-zero (default): turn the pixels the way the EXIF orientation says before encoding. The
      * tag itself never survives, so without this a picture taken upright comes out on its side. */
@@ -76,22 +80,30 @@ typedef struct rimg_options {
     /* R, G, B that transparent pixels are laid over when the output is JPEG, which has no alpha.
      * Default white. PNG output keeps the alpha channel. */
     uint8_t background[3];
-    /* Since 0.2.0. Non-zero (default): store color at half resolution in both directions
-     * (4:2:0), as cameras and browsers do. 0: full resolution (4:4:4), a third larger and sharper
-     * at colored edges -- for drawings and text rather than photos. Only for JPEG output.
-     *
-     * It lives in what was padding at the end of the struct, so the struct's size did not
-     * change: a caller that fills the struct by hand rather than through rimg_options_default
-     * has a zero here and gets full resolution, as 0.1.0 wrote it. */
+    /* Non-zero (default): store color at half resolution in both directions (4:2:0), as cameras
+     * and browsers do. 0: full resolution (4:4:4), a third larger and sharper at colored edges --
+     * for drawings and text rather than photos. Only for JPEG output. */
     uint8_t jpeg_subsampling;
+    /* Non-zero (default): a JPEG is not encoded at a higher quality than it came in with -- the
+     * quality is the lower of jpeg_quality and rimg_info.input_jpeg_quality. More than the
+     * input's quality buys no picture, only bytes: it stores the input's artifacts more
+     * precisely. Where the input's quality is unknown -- a PNG, a WebP -- jpeg_quality is used.
+     * 0: always jpeg_quality. Only for JPEG output. */
+    uint8_t jpeg_quality_from_input;
 } rimg_options;
 
-/* Frozen. */
+/* The module writes all of it, without being told how large the caller's is. */
 typedef struct rimg_info {
     uint32_t input_format; /* RIMG_FORMAT_* */
     uint32_t width;
     uint32_t height;
     uint8_t has_alpha; /* the input carries an alpha channel */
+    /* For a JPEG: the quality, 1..100, whose standard
+     * quantization tables are nearest the ones in the file. A JPEG stores no quality, only the
+     * tables; for a file from libjpeg or a browser this is the number it was written with, for
+     * one with tables of its own -- some cameras, Photoshop -- an estimate of how coarse they
+     * are. 0: not a JPEG, or one without tables before its first scan. */
+    uint8_t input_jpeg_quality;
 } rimg_info;
 
 uint32_t rimg_abi_version(void);

@@ -21,10 +21,12 @@ int main(void)
     OFF(rimg_options, apply_orientation);
     OFF(rimg_options, background);
     OFF(rimg_options, jpeg_subsampling);
+    OFF(rimg_options, jpeg_quality_from_input);
     SIZE(rimg_info);
     OFF(rimg_info, width);
     OFF(rimg_info, height);
     OFF(rimg_info, has_alpha);
+    OFF(rimg_info, input_jpeg_quality);
     printf("value.RIMG_ABI_VERSION %d\n", RIMG_ABI_VERSION);
     printf("value.RIMG_FORMAT_WEBP %u\n", RIMG_FORMAT_WEBP);
     printf("value.RIMG_ERR_ENCODE %d\n", -(RIMG_ERR_ENCODE));

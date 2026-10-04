@@ -85,7 +85,15 @@ fn rust_and_c_agree_on_every_layout() {
             "offsetof.rimg_options.jpeg_subsampling",
             offset_of!(rimg_options, jpeg_subsampling),
         ),
+        (
+            "offsetof.rimg_options.jpeg_quality_from_input",
+            offset_of!(rimg_options, jpeg_quality_from_input),
+        ),
         ("sizeof.rimg_info", size_of::<rimg_info>()),
+        (
+            "offsetof.rimg_info.input_jpeg_quality",
+            offset_of!(rimg_info, input_jpeg_quality),
+        ),
         ("offsetof.rimg_info.width", offset_of!(rimg_info, width)),
         ("offsetof.rimg_info.height", offset_of!(rimg_info, height)),
         ("offsetof.rimg_info.has_alpha", offset_of!(rimg_info, has_alpha)),
@@ -101,4 +109,8 @@ fn rust_and_c_agree_on_every_layout() {
     for (name, value) in rust {
         assert_eq!(c.get(name), Some(&value), "{name}");
     }
+    // Written down so that a change of size is a decision and not an accident: it is an ABI
+    // change, and RIMG_ABI_VERSION moves with it.
+    assert_eq!(size_of::<rimg_options>(), 40);
+    assert_eq!(size_of::<rimg_info>(), 16);
 }
