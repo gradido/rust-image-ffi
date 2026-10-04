@@ -15,9 +15,25 @@ output  what a given input turns into: which pictures are refused, and the bytes
 build   what the prebuild archive holds and what the caller's link line needs.
 ```
 
-## 0.1.0
+## 0.1.1
 
 Not released yet.
+
+- **ABI** unchanged.
+- **output** unchanged; the same image-rs.
+- **build** Five more targets: `x86_64-` and `aarch64-unknown-linux-musl` for Alpine,
+  `x86_64-pc-windows-gnu` for mingw-w64's gcc, `x86_64-` and `aarch64-pc-windows-gnullvm` for zig
+  and llvm-mingw. The MinGW archives hold `librust_image_ffi.a`, the staticlib, as MSVC's hold the
+  `.lib`. **A zig build for Windows takes `-gnullvm`.**
+  The objects are a fifth of the size they were (2.3 MB instead of 12 MB on x86_64 Linux): the
+  release build now makes the staticlib alone, and fat LTO applies to it. Same interface, same
+  link line.
+  Releases build with `--locked` and only when `cargo audit` finds no known vulnerability in a
+  dependency.
+
+## 0.1.0
+
+The first release.
 
 - **ABI** `RIMG_ABI_VERSION` 1. `rimg_reencode`, `rimg_probe`, `rimg_options_default`,
   `rimg_status_string`, `rimg_abi_version`.

@@ -4,36 +4,66 @@
 #   ELF, Mach-O   one relocatable object in which only the rimg_ functions are global
 #   COFF          the staticlib itself; see *Windows* below
 #
+# ELF covers glibc and musl. A musl build is for a caller that links musl dynamically -- a Node
+# addon on Alpine is a shared object --, so it is built without crt-static and asks for libgcc_s,
+# which every Alpine with a C++ runtime has, instead of a static libunwind, which none has by
+# default. The archive carries no libc of its own either way.
+#
 # Why localize: two Rust staticlibs built with different rustc versions collide on
 # rust_eh_personality when linked into one binary, and a #[global_allocator] in one of them fails
 # the link or silently takes over the other's allocations. A localized object has neither problem.
 #
 #   scripts/localize.sh [target-triple]
-#       -> dist/<triple or host>/{rust_image_ffi.o | rust_image_ffi.lib}, rust_image_ffi.h,
-#          NATIVE_LIBS.txt, SHA256SUMS
+#       -> dist/<triple or host>/{rust_image_ffi.o | rust_image_ffi.lib | librust_image_ffi.a},
+#          rust_image_ffi.h, NATIVE_LIBS.txt, SHA256SUMS
 #
 # Windows: MSVC's toolchain has no partial link -- neither link.exe nor lld-link takes -r -- so
 # there is nothing to localize into. The .lib ships as it is. The clash localization avoids is
 # ELF's: a COMDAT group named DW.ref.rust_eh_personality. COFF has no counterpart of it, and two
 # staticlibs that carry std twice are folded by COMDAT selection. Untested with a second Rust
 # staticlib in one binary, and recorded as such in README.md.
+#
+# MinGW (*-windows-gnu for mingw-w64's gcc, *-windows-gnullvm for zig and llvm-mingw) ships the
+# staticlib as well, as librust_image_ffi.a, for the same reason and with the same caveat. GNU ld
+# could link a PE object partially; nobody has tried what the result does to Rust's unwind tables.
+# These targets are built from any host -- a staticlib needs no linker -- which is why the format
+# below follows the target and not the machine.
 set -eu
 
 target=${1:-}
 root=$(cd "$(dirname "$0")/.." && pwd)
 
-case "$(uname -s)" in
-    Linux*) format=elf ;;
-    Darwin*) format=macho ;;
-    MINGW* | MSYS* | CYGWIN*) format=coff ;;
-    *) echo "unsupported host $(uname -s)" >&2; exit 1 ;;
+# By the target when one is named, by this machine otherwise.
+case "$target" in
+    *-linux-*) format=elf ;;
+    *-apple-*) format=macho ;;
+    *-windows-*) format=coff ;;
+    "")
+        case "$(uname -s)" in
+            Linux*) format=elf ;;
+            Darwin*) format=macho ;;
+            MINGW* | MSYS* | CYGWIN*) format=coff ;;
+            *) echo "unsupported host $(uname -s)" >&2; exit 1 ;;
+        esac
+        ;;
+    *) echo "unsupported target $target" >&2; exit 1 ;;
+esac
+
+case "$target" in
+    *-linux-musl) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-crt-static" ;;
 esac
 
 sums() {
     if command -v sha256sum > /dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
-cargo build --release --lib --manifest-path "$root/Cargo.toml" ${target:+--target "$target"}
+# --locked: exactly the versions in Cargo.lock, or no build. The decoders are what this module is
+# trusted for, and a release must not pick up one that nobody looked at.
+#
+# Only the staticlib: the crate is also a cdylib, and linking that needs the target's linker,
+# which a build for another system does not have and this script has no use for.
+cargo rustc --locked --release --lib --crate-type staticlib --manifest-path "$root/Cargo.toml" \
+    ${target:+--target "$target"}
 base="${CARGO_TARGET_DIR:-$root/target}/${target:+$target/}release"
 out="$root/dist/${target:-host}"
 mkdir -p "$out"
@@ -43,8 +73,8 @@ trap 'rm -rf "$work"' EXIT
 
 # What the caller has to put on its link line beside this object. Printed by rustc rather than
 # written down here, because it differs per platform and moves with the dependencies.
-cargo rustc --release --lib --quiet --manifest-path "$root/Cargo.toml" ${target:+--target "$target"} \
-    -- --print native-static-libs 2>&1 | sed -n 's/^note: native-static-libs: *//p' | head -1 \
+cargo rustc --locked --release --lib --crate-type staticlib --quiet --manifest-path "$root/Cargo.toml" \
+    ${target:+--target "$target"} -- --print native-static-libs 2>&1 | sed -n 's/^note: native-static-libs: *//p' | head -1 \
     > "$out/NATIVE_LIBS.txt"
 
 case "$format" in
@@ -157,8 +187,12 @@ macho)
     fi
     ;;
 coff)
-    cp "$base/rust_image_ffi.lib" "$out/rust_image_ffi.lib"
-    artifact=rust_image_ffi.lib
+    # MSVC names it rust_image_ffi.lib, MinGW librust_image_ffi.a.
+    case "$target" in
+        *-gnu | *-gnullvm) artifact=librust_image_ffi.a ;;
+        *) artifact=rust_image_ffi.lib ;;
+    esac
+    cp "$base/$artifact" "$out/$artifact"
     # rustc names the libraries the object needs but not where it found them, and not all of them
     # need be Windows': a crate may ship an import library of its own inside the registry, as
     # windows-targets does. A caller with nothing but this archive cannot link without it, so

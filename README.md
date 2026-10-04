@@ -78,11 +78,13 @@ src/abi.rs                  the C types, field for field, and the defaults
 scripts/localize.sh         release build -> dist/<target>/ the object, .h, NATIVE_LIBS.txt, SHA256SUMS
 scripts/c-smoke.sh          links tests/c/smoke.c against that object with cc and zig cc
 scripts/release-version.sh  what makes a merge a release
+scripts/audit.sh            Cargo.lock against the RustSec advisory database
 tests/reencode.rs           through the C interface: payloads in segments, chunks and behind the
                             end marker, orientation, formats, limits, a decompression bomb,
                             buffers, option structs of an older size
 tests/abi_layout.rs         the C compiler's layout of the header against the Rust one
 examples/make_fixture.rs    writes tests/c/fixture.h, the JPEG the C smoke test feeds in
+fuzz/                       libFuzzer with AddressSanitizer over the C interface; needs nightly
 compare/stb/                the same job with stb_image, for size and fuzzing; see its README
 compare/stb-wasm/           that stb build as WebAssembly under Node; see its README
 ```
@@ -93,10 +95,22 @@ compare/stb-wasm/           that stb build as WebAssembly under Node; see its RE
 cargo test                  # needs a C compiler for the layout test
 scripts/localize.sh         # dist/host/rust_image_ffi.o
 scripts/c-smoke.sh          # the shipped object, linked from C and run
+scripts/audit.sh            # known vulnerabilities in the dependencies
+fuzz/run.sh                 # 30 minutes of fuzzing with AddressSanitizer; needs nightly
 ```
 
 The toolchain is pinned in `rust-toolchain.toml` and image-rs to an exact version in `Cargo.toml`:
 the decoders are the attack surface, so an upgrade is a deliberate release, not a lockfile update.
+Every crate behind it is pinned by `Cargo.lock`, and the release build and the tests in CI run with
+`--locked`: a lockfile that does not match is a failed build, not a silent update.
+`.github/workflows/audit.yml` runs `scripts/audit.sh` on every pull request and once a week, and a
+release does not build while it fails.
+
+`fuzz/run.sh` is the check before a release that changes a decoder: every format allowed, both
+encoders, through `rimg_reencode` and `rimg_probe`, with AddressSanitizer watching the `unsafe`
+that the decoders' SIMD code needs. It is the one thing here that needs a nightly compiler, and
+it is not part of CI: a run is half an hour on eight cores. The last one, on 2026-10-04 against
+image-rs 0.25.10: 34 million inputs on 28 workers, no finding.
 
 ## What ships: a localized object
 
@@ -111,8 +125,25 @@ no partial link, and macOS exports `_rust_eh_personality` as a weak symbol.
 Linux `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`. `panic` stays `"unwind"` in the release
 profile, or a panic would end the host instead of answering `RIMG_ERR_PANIC`.
 
-Size, measured on x86_64 Linux: the object is 12 MB of per-function sections; `tests/c/smoke.c`
-linked against it with `--gc-sections` and stripped is 1.1 MB.
+Size, measured on x86_64 Linux: the object is 2.3 MB; `tests/c/smoke.c` linked against it with
+`--gc-sections` and stripped is 0.9 MB. (Release 0.1.0 shipped 12 MB: it built the crate's other
+crate types along with the staticlib, and that kept fat LTO from applying to it.)
+
+What a release holds, one archive per target:
+
+```text
+x86_64-unknown-linux-gnu     aarch64-unknown-linux-gnu      rust_image_ffi.o
+x86_64-unknown-linux-musl    aarch64-unknown-linux-musl     rust_image_ffi.o     Alpine
+x86_64-apple-darwin          aarch64-apple-darwin           rust_image_ffi.o
+x86_64-pc-windows-msvc       aarch64-pc-windows-msvc        rust_image_ffi.lib
+x86_64-pc-windows-gnu                                       librust_image_ffi.a  mingw-w64 gcc
+x86_64-pc-windows-gnullvm    aarch64-pc-windows-gnullvm     librust_image_ffi.a  zig, llvm-mingw
+```
+
+The musl object is built for a caller that links musl dynamically, as a Node addon on Alpine
+does: it asks for `-lgcc_s -lc` and carries no libc of its own. The MinGW targets ship the
+staticlib like MSVC does. `-gnu` and `-gnullvm` differ in the unwinder they expect -- libgcc's or
+LLVM's libunwind -- and zig brings the second, so **a zig build for Windows takes `-gnullvm`**.
 
 ## Using it from gradido's shared-native
 
@@ -123,11 +154,10 @@ Not done here; what the build there has to settle:
   checks it against a pinned SHA-256, and `build_napi.zig` adds the object with `addObjectFile`
   and the libraries from `NATIVE_LIBS.txt`. zig links it -- `scripts/c-smoke.sh` does exactly that
   with `zig cc`, which needs `-lunwind` beside rustc's list.
-- **Targets that are missing.** `detectTargetTriple` there also answers musl, 32-bit x86 and arm,
-  and on Windows zig builds for the gnu ABI while the prebuild is MSVC's. The release matrix here
-  is glibc Linux, macOS and MSVC Windows, x64 and arm64. Linux in Docker (bookworm) and macOS are
-  covered; Windows and Alpine need a row each (`*-pc-windows-gnullvm`, `*-unknown-linux-musl`)
-  before the build there can rely on it.
+- **Which archive.** zig's target says it: `*-linux-gnu` and `*-linux-musl` take the Rust target
+  of the same name, `*-macos` takes `*-apple-darwin`, and `*-windows` -- where zig builds for the
+  gnu ABI -- takes `*-pc-windows-gnullvm`, not MSVC's. `detectTargetTriple` there also answers
+  32-bit x86 and arm; for those there is no prebuild.
 - **The byte budgets.** `CHAT_IMAGE_MAX_BYTES` and `AVATAR_*_MAX_BYTES` bound what the browser
   sends. The re-encoded picture is a different size -- larger, when the browser encoded below the
   quality asked for here. Passing the budget as `out_cap` makes that an answer

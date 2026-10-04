@@ -4,7 +4,8 @@
 # the base branch's and than every tag -- the same check the release gate already ran on the open
 # pull request, run again here because a title can be edited after a green check.
 #
-# What it publishes, per target: rust_image_ffi.o (ELF, Mach-O) or rust_image_ffi.lib (COFF), the header,
+# What it publishes, per target: rust_image_ffi.o (ELF, Mach-O), rust_image_ffi.lib (MSVC) or
+# librust_image_ffi.a (MinGW), the header,
 # NATIVE_LIBS.txt with the libraries the caller's link line needs, and SHA256SUMS -- in one
 # archive per target, with a SHA256SUMS over the archives beside them. A consumer pins a version
 # and a hash.
@@ -68,8 +69,20 @@ jobs:
             *) echo "publish=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
-  build:
+  # A release with a known vulnerability in a decoder does not go out. scripts/audit.sh is the
+  # same check the audit workflow runs on every pull request and once a week.
+  audit:
     needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - run: scripts/audit.sh
+
+  build:
+    needs: [gate, audit]
     if: needs.gate.outputs.publish == 'true'
     strategy:
       # One platform failing must not hide what the others would have said.
@@ -92,6 +105,16 @@ jobs:
           - { os: macos-14, target: x86_64-apple-darwin, cross: true }
           - { os: windows-2022, target: x86_64-pc-windows-msvc, arch: x64 }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc, arch: arm64 }
+          # musl, for Alpine: built on the glibc runner of the same architecture -- a staticlib
+          # needs no linker -- and proven in an Alpine container with Alpine's own cc.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl, add_target: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, add_target: true }
+          # MinGW. -gnu is for mingw-w64's gcc, which the runner has; -gnullvm is for zig and
+          # llvm-mingw, which bring libunwind instead of libgcc, and is the only MinGW target
+          # there is for arm64. zig comes from pip.
+          - { os: windows-2022, target: x86_64-pc-windows-gnu, add_target: true, mingw: true }
+          - { os: windows-2022, target: x86_64-pc-windows-gnullvm, add_target: true, mingw: true, zig: true }
+          - { os: windows-11-arm, target: aarch64-pc-windows-gnullvm, add_target: true, mingw: true, zig: true }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -104,7 +127,7 @@ jobs:
       # rust-toolchain.toml pins the compiler; this installs exactly that one.
       - run: rustup show
       - name: the target, when it is not this machine's
-        if: matrix.cross
+        if: matrix.cross || matrix.add_target
         run: rustup target add ${{ matrix.target }}
       # llvm-objcopy and llvm-nm of the pinned rustc: scripts/localize.sh weakens one symbol with
       # them on Mach-O, which Apple's tools cannot do, and reads the object with an LLVM that
@@ -115,17 +138,21 @@ jobs:
       # Nothing here needs a network or a second machine, so the whole suite runs everywhere. On
       # the cross row it tests this machine's build of the same source.
       - name: tests
-        run: cargo test --release
+        run: cargo test --locked --release
       - name: build the prebuild
         run: scripts/localize.sh ${{ matrix.target }}
+      # The version shared-native builds with. scripts/c-smoke.sh finds it as `python -m ziglang`.
+      - name: zig, for the targets that are linked with it
+        if: matrix.zig
+        run: python -m pip install ziglang==0.15.2
       - name: link it from C and run it
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' || matrix.mingw
         env:
           # A cross-built object links here and runs nowhere on this machine.
           SMOKE_LINK_ONLY: ${{ matrix.cross && '1' || '0' }}
         run: scripts/c-smoke.sh ${{ matrix.target }}
       - name: link it from C and run it
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !matrix.mingw
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSPATH=%%i

@@ -1,0 +1,22 @@
+# Checks the dependencies against the RustSec advisory database: on every pull request, and once
+# a week without one -- an advisory for a decoder is published whether or not this repository
+# changed, and a module that is released rarely would otherwise learn of it at the next release.
+name: audit
+
+on:
+  pull_request:
+  schedule:
+    # Mondays, 05:17 UTC. Not on the hour, when every scheduled workflow on GitHub starts.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/audit.sh
