@@ -2,13 +2,14 @@
 
 What somebody who pinned an earlier prebuild has to know before pinning the next one. The
 generated release notes list the pull requests; this file answers the questions a list of pull
-requests does not: **does my C caller still compile, and does the same picture still come out
-the same?**
+requests does not: **what in my C caller do I have to change, and does the same picture still
+come out the same?**
 
 ```text
-ABI     the C header. Only grows: fields at the end of rimg_options, new numbers for new formats
-        and status codes. RIMG_ABI_VERSION moves only when that promise is broken, which is not
-        planned.
+ABI     the C header. Not stable: structs, defaults and functions may change with any version.
+        Every entry says what changed; whoever moves to that version checks the calling code
+        against it and recompiles with the header from the same archive. RIMG_ABI_VERSION moves
+        with every change a compiled caller would notice.
 output  what a given input turns into: which pictures are refused, and the bytes of the ones
         that are not. A decoder or encoder upgrade may move both, and a caller that stores a
         hash of the result has to know.
@@ -17,10 +18,12 @@ build   what the prebuild archive holds and what the caller's link line needs.
 
 ## 0.2.1
 
-- **ABI** Two fields more, each in a byte that was padding, so neither struct changed its size:
-  `rimg_info.input_jpeg_quality`, the quality a JPEG came in with (0 for anything else), and
-  `rimg_options.jpeg_quality_from_input`, non-zero by default. `rimg_info` stays frozen at 16
-  bytes.
+- **ABI** `RIMG_ABI_VERSION` 4. **Recompile, and remove `struct_size` from the calling code**:
+  `rimg_options` has lost that field and is 40 bytes instead of 48, with every other field eight
+  bytes earlier. It was there for callers compiled against an older header, and the header no
+  longer promises them anything: the ABI is not stable, each version is checked against this
+  file. Two fields more: `rimg_info.input_jpeg_quality`, the quality a JPEG came in with (0 for
+  anything else), and `rimg_options.jpeg_quality_from_input`, non-zero by default.
 - **output** **A JPEG is no longer encoded at a higher quality than it came in with.** With the
   defaults, `jpeg_quality` is now the highest quality used: a JPEG of quality 60 comes out at 60,
   not at 85, and a quarter smaller for it. `jpeg_quality_from_input = 0` is the old behavior.

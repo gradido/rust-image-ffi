@@ -109,7 +109,8 @@ fn rust_and_c_agree_on_every_layout() {
     for (name, value) in rust {
         assert_eq!(c.get(name), Some(&value), "{name}");
     }
-    // The fields added since 0.1.0 took padding; neither struct may have grown.
-    assert_eq!(size_of::<rimg_options>(), 48);
+    // Written down so that a change of size is a decision and not an accident: it is an ABI
+    // change, and RIMG_ABI_VERSION moves with it.
+    assert_eq!(size_of::<rimg_options>(), 40);
     assert_eq!(size_of::<rimg_info>(), 16);
 }

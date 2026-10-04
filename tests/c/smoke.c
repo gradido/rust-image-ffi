@@ -66,7 +66,6 @@ int main(void)
     CHECK(info.width == FIXTURE_WIDTH && info.height == FIXTURE_HEIGHT);
 
     rimg_options_default(&opt);
-    CHECK(opt.struct_size == sizeof(opt));
     CHECK(opt.input_formats == RIMG_FORMAT_JPEG);
 
     /* Asking for the size first, then with a buffer. */

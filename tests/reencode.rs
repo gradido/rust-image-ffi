@@ -374,6 +374,54 @@ fn the_quality_a_jpeg_was_written_with_is_found_again() {
     }
 }
 
+/// Renumbers the quantization tables of a JPEG, in the table segments and in the frame header
+/// that says which component uses which. The picture stays the same picture.
+fn with_table_numbers(jpeg: &[u8], renumber: fn(u8) -> u8) -> Vec<u8> {
+    let mut out = jpeg.to_vec();
+    let mut at = 2;
+    while out[at] == 0xff && out[at + 1] != 0xda {
+        let marker = out[at + 1];
+        let length = u16::from_be_bytes([out[at + 2], out[at + 3]]) as usize;
+        if marker == 0xdb {
+            let mut table = at + 4;
+            while table < at + 2 + length {
+                let wide = out[table] >> 4 != 0;
+                out[table] = (out[table] & 0xf0) | renumber(out[table] & 0x0f);
+                table += 1 + if wide { 128 } else { 64 };
+            }
+        }
+        if marker == 0xc0 {
+            for component in 0..out[at + 9] as usize {
+                let selector = at + 12 + 3 * component;
+                out[selector] = renumber(out[selector]);
+            }
+        }
+        at += 2 + length;
+    }
+    out
+}
+
+#[test]
+fn the_quality_does_not_depend_on_how_a_file_numbers_its_tables() {
+    for quality in [40, 60, 75, 90] {
+        let mut usual = Vec::new();
+        picture(64, 48)
+            .write_with_encoder(JpegEncoder::new_with_quality(&mut usual, quality))
+            .unwrap();
+        assert_eq!(probed(&usual).input_jpeg_quality, quality);
+        let pixels = image::load_from_memory(&usual).unwrap();
+
+        for renumber in [|n| 1 - n, |n| n + 2] {
+            let renumbered = with_table_numbers(&usual, renumber);
+            assert_ne!(renumbered, usual);
+            // Still the same picture to a decoder ...
+            assert_eq!(image::load_from_memory(&renumbered).unwrap(), pixels);
+            // ... and written with the same quality.
+            assert_eq!(probed(&renumbered).input_jpeg_quality, quality);
+        }
+    }
+}
+
 #[test]
 fn a_jpeg_is_not_encoded_at_a_higher_quality_than_it_came_in_with() {
     let at = |quality: u8| {
@@ -527,7 +575,6 @@ fn arguments_are_checked() {
     assert_eq!(invalid(|o| o.input_formats = 8), RIMG_ERR_INVALID_ARGUMENT);
     assert_eq!(invalid(|o| o.jpeg_quality = 0), RIMG_ERR_INVALID_ARGUMENT);
     assert_eq!(invalid(|o| o.jpeg_quality = 101), RIMG_ERR_INVALID_ARGUMENT);
-    assert_eq!(invalid(|o| o.struct_size = 2), RIMG_ERR_INVALID_ARGUMENT);
 
     let mut out = [0u8; 16];
     let mut len = 0usize;
@@ -569,19 +616,6 @@ fn arguments_are_checked() {
             RIMG_ERR_INVALID_ARGUMENT
         );
     }
-}
-
-#[test]
-fn an_older_callers_shorter_options_leave_the_rest_at_the_defaults() {
-    // A caller compiled when the struct ended after output_format: it allows PNG and says
-    // nothing about limits or quality, and what lies behind its struct is not read.
-    let mut opt = options();
-    opt.struct_size = 12;
-    opt.input_formats = RIMG_FORMAT_PNG;
-    opt.max_width = 1;
-    opt.jpeg_quality = 0;
-    let png = encoded(&DynamicImage::ImageRgb8(picture(16, 16)), ImageFormat::Png);
-    assert_eq!(run(&opt, &png, 1 << 16).0, RIMG_OK);
 }
 
 #[test]

@@ -35,6 +35,11 @@ int32_t status = rimg_reencode(&opt, in, in_len, out, sizeof(out), &out_len, &in
  * RIMG_ERR_UNSUPPORTED, _DECODE, _LIMIT: refused. rimg_status_string(status) for the log. */
 ```
 
+**The ABI is not stable.** Structs and defaults change between versions; a prebuild and the
+header in its archive belong together. Moving to another version means reading
+[`CHANGELOG.md`](CHANGELOG.md), adapting the caller where it says so, and recompiling.
+`rimg_abi_version() == RIMG_ABI_VERSION` at start tells a mismatch of the two.
+
 No handle, no state, no buffer the caller frees. Every function is thread-safe; a panic is caught
 at the boundary and becomes `RIMG_ERR_PANIC`. `rimg_reencode` is CPU work for the length of the
 call -- a Node addon calls it from a worker (`Napi::AsyncWorker`), not on the event loop.

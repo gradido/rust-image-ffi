@@ -9,8 +9,12 @@
 //! For a file from such an encoder the answer is exact. For one with tables of its own -- some
 //! cameras, Photoshop, mozjpeg at its own defaults -- it is the quality whose standard tables
 //! divide about as coarsely, which is what a caller that wants to encode "as well as this, and
-//! no better" needs. It reads nothing but the table segments, and everything through checked
-//! slices: what it is handed is the sender's bytes.
+//! no better" needs.
+//!
+//! Which table is the luminance's is said by the frame header, not by the table's number: nearly
+//! every encoder numbers them 0 and 1, and a file need not. It reads nothing but the table
+//! segments and the frame header, and everything through checked slices: what it is handed is the
+//! sender's bytes.
 
 /// The standard's luminance and chrominance tables, in reading order.
 const STANDARD: [[u16; 64]; 2] = [
@@ -33,12 +37,17 @@ const ZIGZAG: [usize; 64] = [
     46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// The tables with id 0 and 1 -- by convention luminance and chrominance -- in reading order.
-type Tables = [Option<[u16; 64]>; 2];
+/// What stands in front of the first scan: the tables by their number, in reading order, and
+/// which of them the frame header gives the first component -- the luminance -- and the second.
+#[derive(Default)]
+struct Header {
+    tables: [Option<[u16; 64]>; 4],
+    selectors: Option<(u8, Option<u8>)>,
+}
 
-/// Walks the segments in front of the first scan and keeps what the table segments define.
-fn tables(jpeg: &[u8]) -> Tables {
-    let mut found: Tables = [None, None];
+/// Walks the segments in front of the first scan.
+fn header(jpeg: &[u8]) -> Header {
+    let mut found = Header::default();
     if jpeg.get(..2) != Some(&[0xff, 0xd8]) {
         return found;
     }
@@ -56,7 +65,7 @@ fn tables(jpeg: &[u8]) -> Tables {
                 at += 1;
                 continue;
             }
-            // The pixels begin, or the file ends: the tables that count stand before this.
+            // The pixels begin, or the file ends: what counts stands before this.
             0xda | 0xd9 | 0x00 => return found,
             _ => {}
         }
@@ -68,28 +77,41 @@ fn tables(jpeg: &[u8]) -> Tables {
             return found;
         };
         at += 1 + length;
-        if marker != 0xdb {
-            continue;
-        }
-        // One segment may define several tables: a byte of precision and id, then 64 entries of
-        // one byte, or of two when the precision says so.
-        while let Some((&head, rest)) = body.split_first() {
-            let wide = head >> 4 != 0;
-            let Some(entries) = rest.get(..if wide { 128 } else { 64 }) else {
-                return found;
-            };
-            body = &rest[entries.len()..];
-            let mut table = [0u16; 64];
-            for (k, &natural) in ZIGZAG.iter().enumerate() {
-                table[natural] = if wide {
-                    u16::from_be_bytes([entries[2 * k], entries[2 * k + 1]])
-                } else {
-                    entries[k] as u16
-                };
+        match marker {
+            // The quantization tables. One segment may define several: a byte of precision and
+            // number, then 64 entries of one byte, or of two when the precision says so.
+            0xdb => {
+                while let Some((&head, rest)) = body.split_first() {
+                    let wide = head >> 4 != 0;
+                    let Some(entries) = rest.get(..if wide { 128 } else { 64 }) else {
+                        return found;
+                    };
+                    body = &rest[entries.len()..];
+                    let mut table = [0u16; 64];
+                    for (k, &natural) in ZIGZAG.iter().enumerate() {
+                        table[natural] = if wide {
+                            u16::from_be_bytes([entries[2 * k], entries[2 * k + 1]])
+                        } else {
+                            entries[k] as u16
+                        };
+                    }
+                    if let Some(slot) = found.tables.get_mut((head & 0x0f) as usize) {
+                        *slot = Some(table);
+                    }
+                }
             }
-            if let Some(slot) = found.get_mut((head & 0x0f) as usize) {
-                *slot = Some(table);
+            // The frame header, in any of its kinds -- c4, c8 and cc are other segments. Six
+            // bytes of precision and size, then per component its id, its sampling factors and
+            // the number of its quantization table.
+            0xc0..=0xcf if !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
+                let selector = |component: usize| body.get(6 + 3 * component + 2).copied();
+                let components = body.get(5).copied().unwrap_or(0);
+                if let Some(luminance) = selector(0) {
+                    let chrominance = if components >= 2 { selector(1) } else { None };
+                    found.selectors = Some((luminance, chrominance));
+                }
             }
+            _ => {}
         }
     }
 }
@@ -106,15 +128,23 @@ fn scaled(standard: &[u16; 64], quality: u32) -> [u16; 64] {
 
 /// 1..=100, or `None` for what is no JPEG or carries no luminance table before its first scan.
 pub fn estimate(jpeg: &[u8]) -> Option<u8> {
-    let found = tables(jpeg);
-    found[0]?;
+    let found = header(jpeg);
+    // Without a frame header in front of the first scan, the numbers every encoder uses.
+    let (luminance, chrominance) = found.selectors.unwrap_or((0, Some(1)));
+    let table = |selector: u8| found.tables.get(selector as usize).and_then(Option::as_ref);
+    let luminance_table = table(luminance)?;
+    // A file may divide every component by the one table. That table is then measured as the
+    // luminance's, once, and not held against the chrominance's standard as well.
+    let chrominance_table = chrominance.filter(|&c| c != luminance).and_then(table);
     let distance = |quality: u32| -> u64 {
-        found
-            .iter()
-            .zip(&STANDARD)
-            .filter_map(|(table, standard)| table.as_ref().map(|table| (table, scaled(standard, quality))))
-            .flat_map(|(table, candidate)| table.iter().zip(candidate).map(|(&a, b)| a.abs_diff(b) as u64))
-            .sum()
+        [
+            (Some(luminance_table), &STANDARD[0]),
+            (chrominance_table, &STANDARD[1]),
+        ]
+        .into_iter()
+        .filter_map(|(table, standard)| table.map(|table| (table, scaled(standard, quality))))
+        .flat_map(|(table, candidate)| table.iter().zip(candidate).map(|(&a, b)| a.abs_diff(b) as u64))
+        .sum()
     };
     // The highest of equally near qualities: at the low end several give the same tables, and
     // the answer is used as a bound from above.
@@ -146,6 +176,64 @@ mod tests {
         }
         jpeg.extend([0xff, 0xda, 0, 2]);
         jpeg
+    }
+
+    /// The same, with the tables numbered as the caller says and a frame header that names them:
+    /// `luminance` and `chrominance` are table numbers, `components` how many the frame has.
+    fn with_frame(quality: u32, luminance: u8, chrominance: u8, components: u8) -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8];
+        let mut numbers = vec![luminance];
+        if chrominance != luminance {
+            numbers.push(chrominance);
+        }
+        for (number, standard) in numbers.iter().zip(&STANDARD) {
+            jpeg.extend([0xff, 0xdb, 0, 67, *number]);
+            let table = scaled(standard, quality);
+            jpeg.extend(ZIGZAG.map(|natural| table[natural] as u8));
+        }
+        jpeg.extend([0xff, 0xc0]);
+        jpeg.extend((8 + 3 * components as u16).to_be_bytes());
+        jpeg.extend([8, 0, 16, 0, 16, components]);
+        for component in 0..components {
+            let selector = if component == 0 { luminance } else { chrominance };
+            jpeg.extend([component + 1, 0x11, selector]);
+        }
+        jpeg.extend([0xff, 0xda, 0, 2]);
+        jpeg
+    }
+
+    #[test]
+    fn the_frame_header_says_which_table_is_the_luminances() {
+        for quality in [20, 40, 60, 75, 90, 100] {
+            let expected = Some(quality as u8);
+            // As every encoder numbers them, swapped, and with the two numbers nobody uses.
+            assert_eq!(estimate(&with_frame(quality, 0, 1, 3)), expected);
+            assert_eq!(estimate(&with_frame(quality, 1, 0, 3)), expected);
+            assert_eq!(estimate(&with_frame(quality, 2, 3, 3)), expected);
+            assert_eq!(estimate(&with_frame(quality, 3, 0, 3)), expected);
+            // A gray picture, whose one table has any number.
+            assert_eq!(estimate(&with_frame(quality, 0, 0, 1)), expected);
+            assert_eq!(estimate(&with_frame(quality, 1, 1, 1)), expected);
+            // Three components and one table for all of them.
+            assert_eq!(estimate(&with_frame(quality, 0, 0, 3)), expected);
+        }
+    }
+
+    #[test]
+    fn a_frame_that_names_a_table_the_file_does_not_have_has_no_quality() {
+        let mut jpeg = with_frame(60, 0, 1, 3);
+        let frame = jpeg.windows(2).position(|w| w == [0xff, 0xc0]).unwrap();
+        // The luminance's selector: two bytes of marker, two of length, six of header, then the
+        // first component's id and sampling.
+        jpeg[frame + 12] = 2;
+        assert_eq!(estimate(&jpeg), None);
+        // A number that is no table at all.
+        jpeg[frame + 12] = 200;
+        assert_eq!(estimate(&jpeg), None);
+        // Only the chrominance's is missing: the luminance's table still says it.
+        let mut jpeg = with_frame(60, 0, 1, 3);
+        jpeg[frame + 15] = 3;
+        assert_eq!(estimate(&jpeg), Some(60));
     }
 
     #[test]
@@ -182,10 +270,14 @@ mod tests {
 
     #[test]
     fn a_file_cut_anywhere_is_read_without_a_panic() {
-        let jpeg = with_tables(75, true);
-        for end in 0..jpeg.len() {
-            let _ = estimate(&jpeg[..end]);
+        for jpeg in [with_tables(75, true), with_frame(75, 1, 0, 3)] {
+            for end in 0..jpeg.len() {
+                let _ = estimate(&jpeg[..end]);
+            }
         }
+        // A frame header that claims more components than it has bytes for, and an empty one.
+        let _ = estimate(&[0xff, 0xd8, 0xff, 0xc0, 0, 8, 8, 0, 16, 0, 16, 255]);
+        let _ = estimate(&[0xff, 0xd8, 0xff, 0xc2, 0, 2]);
         // Lengths that point outside the file, and a table id that is no table.
         let _ = estimate(&[0xff, 0xd8, 0xff, 0xdb, 0xff, 0xff, 0x00, 1, 2, 3]);
         let _ = estimate(&[0xff, 0xd8, 0xff, 0xdb, 0x00, 0x00]);
