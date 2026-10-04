@@ -53,6 +53,78 @@ case "$target" in
     *-linux-musl) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-crt-static" ;;
 esac
 
+# The JPEG encoder is C, and it is built with zig for every target but MSVC's: the same compiler
+# on every runner, the one gradido's shared-native builds its own C with, and one that needs no
+# toolchain installed per target. zig is taken from PATH, from where shared-native keeps its own,
+# or from pip. The *-windows-msvc artifacts are for callers on MSVC's toolchain and are built
+# with it -- cl, which the cc crate finds by itself.
+#
+# An explicit CC_<target> in the environment wins. Without zig, a build for this machine falls
+# back to the system's cc and says so; RIMG_REQUIRE_ZIG=1, which the release workflow sets, makes
+# that an error, so that a failed installation cannot change what a release is built with.
+zig=""
+if command -v zig > /dev/null 2>&1; then
+    zig="zig"
+elif [ -x "$HOME/.zig-build/zig/0.15.2/zig" ]; then
+    zig="$HOME/.zig-build/zig/0.15.2/zig"
+elif python3 -m ziglang version > /dev/null 2>&1; then
+    zig="python3 -m ziglang"
+elif python -m ziglang version > /dev/null 2>&1; then
+    zig="python -m ziglang"
+fi
+
+triple=${target:-$(cd "$root" && rustc -vV | sed -n 's/^host: //p')}
+arch=${triple%%-*}
+zig_target=""
+fallback=0
+case "$triple" in
+    # glibc 2.17 is what Rust's own standard library asks for; the C must not ask for more.
+    *-linux-gnu) zig_target="$arch-linux-gnu.2.17"; [ -z "$target" ] && fallback=1 ;;
+    *-linux-musl) zig_target="$arch-linux-musl" ;;
+    # The oldest macOS Rust itself builds for, so that the linker does not find objects in one
+    # file that disagree about it.
+    x86_64-apple-darwin) zig_target="x86_64-macos.10.12"; fallback=1 ;;
+    aarch64-apple-darwin) zig_target="aarch64-macos.11.0"; fallback=1 ;;
+    *-windows-gnu | *-windows-gnullvm) zig_target="$arch-windows-gnu" ;;
+esac
+wrappers=""
+if [ -n "$zig_target" ]; then
+    env_target=$(printf '%s' "$triple" | tr '-' '_')
+    if eval "[ -z \"\${CC_$env_target:-}\" ]"; then
+        if [ -z "$zig" ] && [ "$fallback" = 1 ] && [ "${RIMG_REQUIRE_ZIG:-0}" != 1 ]; then
+            echo "note: no zig found; the C encoder is built with the system's cc" >&2
+            zig_target=""
+        elif [ -z "$zig" ]; then
+            echo "building for $triple needs zig as its C compiler: install it (pip install" \
+                "ziglang), or set CC_$env_target" >&2
+            exit 1
+        fi
+    fi
+    if [ -n "$zig_target" ] && eval "[ -z \"\${CC_$env_target:-}\" ]"; then
+        # Through a wrapper, for one reason: the cc crate sees a clang and hands it
+        # --target=<Rust's triple>, a spelling zig does not know. The wrapper drops it; the
+        # target zig is to build for is the one named here.
+        wrappers=$(mktemp -d)
+        cat > "$wrappers/cc" << EOF
+#!/bin/sh
+for arg do
+    shift
+    case "\$arg" in --target=*) ;; *) set -- "\$@" "\$arg" ;; esac
+done
+exec $zig cc -target $zig_target "\$@"
+EOF
+        printf '#!/bin/sh\nexec %s ar "$@"\n' "$zig" > "$wrappers/ar"
+        chmod +x "$wrappers/cc" "$wrappers/ar"
+        case "$(uname -s)" in
+            # Windows starts programs, not scripts: the shell is named with it.
+            MINGW* | MSYS* | CYGWIN*) run_script="sh " ;;
+            *) run_script="" ;;
+        esac
+        export "CC_$env_target=$run_script$wrappers/cc"
+        export "AR_$env_target=$run_script$wrappers/ar"
+    fi
+fi
+
 sums() {
     if command -v sha256sum > /dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
@@ -69,7 +141,7 @@ out="$root/dist/${target:-host}"
 mkdir -p "$out"
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work" ${wrappers:+"$wrappers"}' EXIT
 
 # What the caller has to put on its link line beside this object. Printed by rustc rather than
 # written down here, because it differs per platform and moves with the dependencies.

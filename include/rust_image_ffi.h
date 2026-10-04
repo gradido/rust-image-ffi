@@ -76,6 +76,14 @@ typedef struct rimg_options {
     /* R, G, B that transparent pixels are laid over when the output is JPEG, which has no alpha.
      * Default white. PNG output keeps the alpha channel. */
     uint8_t background[3];
+    /* Since 0.1.1. Non-zero (default): store color at half resolution in both directions
+     * (4:2:0), as cameras and browsers do. 0: full resolution (4:4:4), a third larger and sharper
+     * at colored edges -- for drawings and text rather than photos. Only for JPEG output.
+     *
+     * It lives in what was padding at the end of the struct, so the struct's size did not
+     * change: a caller that fills the struct by hand rather than through rimg_options_default
+     * has a zero here and gets full resolution, as 0.1.0 wrote it. */
+    uint8_t jpeg_subsampling;
 } rimg_options;
 
 /* Frozen. */
