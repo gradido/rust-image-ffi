@@ -11,4 +11,5 @@
 pub mod abi;
 #[allow(unsafe_code)]
 pub mod ffi;
+mod quality;
 pub mod reencode;

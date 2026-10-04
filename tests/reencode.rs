@@ -99,7 +99,8 @@ fn a_clean_jpeg_comes_back_as_a_jpeg_of_the_same_size() {
             input_format: RIMG_FORMAT_JPEG,
             width: 64,
             height: 48,
-            has_alpha: 0
+            has_alpha: 0,
+            input_jpeg_quality: 90
         }
     );
     assert_eq!(image::guess_format(&out).unwrap(), ImageFormat::Jpeg);
@@ -339,6 +340,70 @@ fn color_is_stored_at_half_resolution_unless_asked_otherwise() {
     }
 }
 
+fn probed(input: &[u8]) -> rimg_info {
+    let mut info = rimg_info::default();
+    assert_eq!(
+        unsafe { rimg_probe(input.as_ptr(), input.len(), &mut info) },
+        RIMG_OK
+    );
+    info
+}
+
+#[test]
+fn the_quality_a_jpeg_was_written_with_is_found_again() {
+    let png = encoded(&DynamicImage::ImageRgb8(picture(48, 48)), ImageFormat::Png);
+    let mut opt = options();
+    opt.input_formats = RIMG_FORMAT_PNG | RIMG_FORMAT_JPEG;
+    opt.jpeg_quality_from_input = 0;
+    for quality in [10, 30, 50, 60, 75, 85, 95, 100] {
+        // By this module's encoder, with and without subsampling ...
+        for subsampling in [1, 0] {
+            opt.jpeg_quality = quality;
+            opt.jpeg_subsampling = subsampling;
+            let (out, info) = ok(&opt, &png);
+            assert_eq!(info.input_jpeg_quality, 0, "a PNG has none");
+            assert_eq!(probed(&out).input_jpeg_quality, quality);
+        }
+        // ... and by image-rs's, which is another implementation of the same tables.
+        let mut other = Vec::new();
+        picture(48, 48)
+            .write_with_encoder(JpegEncoder::new_with_quality(&mut other, quality))
+            .unwrap();
+        assert_eq!(probed(&other).input_jpeg_quality, quality);
+        assert_eq!(ok(&opt, &other).1.input_jpeg_quality, quality);
+    }
+}
+
+#[test]
+fn a_jpeg_is_not_encoded_at_a_higher_quality_than_it_came_in_with() {
+    let at = |quality: u8| {
+        let mut out = Vec::new();
+        picture(96, 96)
+            .write_with_encoder(JpegEncoder::new_with_quality(&mut out, quality))
+            .unwrap();
+        out
+    };
+    // The default: quality 85 at most.
+    let opt = options();
+    assert_eq!((opt.jpeg_quality, opt.jpeg_quality_from_input), (85, 1));
+    assert_eq!(probed(&ok(&opt, &at(60)).0).input_jpeg_quality, 60);
+    assert_eq!(probed(&ok(&opt, &at(85)).0).input_jpeg_quality, 85);
+    assert_eq!(probed(&ok(&opt, &at(95)).0).input_jpeg_quality, 85);
+
+    // Switched off, jpeg_quality is what is used, whatever came in.
+    let mut fixed = options();
+    fixed.jpeg_quality_from_input = 0;
+    let (larger, _) = ok(&fixed, &at(60));
+    assert_eq!(probed(&larger).input_jpeg_quality, 85);
+    assert!(ok(&opt, &at(60)).0.len() < larger.len());
+
+    // What has no quality of its own gets jpeg_quality.
+    let mut opt = options();
+    opt.input_formats = RIMG_FORMAT_PNG;
+    let png = encoded(&DynamicImage::ImageRgb8(picture(96, 96)), ImageFormat::Png);
+    assert_eq!(probed(&ok(&opt, &png).0).input_jpeg_quality, 85);
+}
+
 #[test]
 fn gray_stays_gray() {
     let image = image::GrayImage::from_fn(40, 30, |x, _| image::Luma([(x * 6) as u8]));
@@ -431,7 +496,8 @@ fn probe_reads_the_header_whatever_the_options_would_allow() {
             input_format: RIMG_FORMAT_PNG,
             width: 30,
             height: 20,
-            has_alpha: 1
+            has_alpha: 1,
+            input_jpeg_quality: 0
         }
     );
     assert_eq!(

@@ -68,7 +68,8 @@ typedef struct rimg_options {
     uint64_t max_pixels;
     /* What decoding may allocate for pixels. Default 128 MiB; 0 means no limit. */
     uint64_t max_alloc_bytes;
-    /* 1..100, default 85. Only for JPEG output. */
+    /* 1..100, default 85. Only for JPEG output. With jpeg_quality_from_input, which is the
+     * default, it is the highest quality that is used rather than the one that always is. */
     uint8_t jpeg_quality;
     /* Non-zero (default): turn the pixels the way the EXIF orientation says before encoding. The
      * tag itself never survives, so without this a picture taken upright comes out on its side. */
@@ -84,14 +85,26 @@ typedef struct rimg_options {
      * change: a caller that fills the struct by hand rather than through rimg_options_default
      * has a zero here and gets full resolution, as 0.1.0 wrote it. */
     uint8_t jpeg_subsampling;
+    /* Since 0.2.1, in a byte that was padding as well. Non-zero (default): a JPEG is not encoded
+     * at a higher quality than it came in with -- the quality is the lower of jpeg_quality and
+     * rimg_info.input_jpeg_quality. More than the input's quality buys no picture, only bytes: it
+     * stores the input's artifacts more precisely. Where the input's quality is unknown -- a PNG,
+     * a WebP -- jpeg_quality is used. 0: always jpeg_quality. Only for JPEG output. */
+    uint8_t jpeg_quality_from_input;
 } rimg_options;
 
-/* Frozen. */
+/* Frozen at 16 bytes: the module writes it without being told how large the caller's is. */
 typedef struct rimg_info {
     uint32_t input_format; /* RIMG_FORMAT_* */
     uint32_t width;
     uint32_t height;
     uint8_t has_alpha; /* the input carries an alpha channel */
+    /* Since 0.2.1, in a byte that was padding. For a JPEG: the quality, 1..100, whose standard
+     * quantization tables are nearest the ones in the file. A JPEG stores no quality, only the
+     * tables; for a file from libjpeg or a browser this is the number it was written with, for
+     * one with tables of its own -- some cameras, Photoshop -- an estimate of how coarse they
+     * are. 0: not a JPEG, or one without tables before its first scan. */
+    uint8_t input_jpeg_quality;
 } rimg_info;
 
 uint32_t rimg_abi_version(void);

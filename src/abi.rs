@@ -32,6 +32,7 @@ pub struct rimg_options {
     pub apply_orientation: u8,
     pub background: [u8; 3],
     pub jpeg_subsampling: u8,
+    pub jpeg_quality_from_input: u8,
 }
 
 #[repr(C)]
@@ -41,6 +42,7 @@ pub struct rimg_info {
     pub width: u32,
     pub height: u32,
     pub has_alpha: u8,
+    pub input_jpeg_quality: u8,
 }
 
 pub fn default_options() -> rimg_options {
@@ -56,5 +58,6 @@ pub fn default_options() -> rimg_options {
         apply_orientation: 1,
         background: [255, 255, 255],
         jpeg_subsampling: 1,
+        jpeg_quality_from_input: 1,
     }
 }

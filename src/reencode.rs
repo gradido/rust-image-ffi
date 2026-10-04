@@ -15,6 +15,7 @@ use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Lim
 use mozjpeg::ColorSpace as JpegColor;
 
 use crate::abi::*;
+use crate::quality;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -96,6 +97,7 @@ pub struct Config {
     pub max_alloc_bytes: Option<u64>,
     pub jpeg_quality: u8,
     pub jpeg_subsampling: bool,
+    pub jpeg_quality_from_input: bool,
     pub apply_orientation: bool,
     pub background: [u8; 3],
 }
@@ -123,6 +125,7 @@ impl Config {
             max_alloc_bytes: (o.max_alloc_bytes != 0).then_some(o.max_alloc_bytes),
             jpeg_quality: o.jpeg_quality,
             jpeg_subsampling: o.jpeg_subsampling != 0,
+            jpeg_quality_from_input: o.jpeg_quality_from_input != 0,
             apply_orientation: o.apply_orientation != 0,
             background: o.background,
         })
@@ -135,13 +138,21 @@ impl Default for Config {
     }
 }
 
-fn info(format: Format, (width, height): (u32, u32), color: ColorType) -> rimg_info {
+fn info(format: Format, (width, height): (u32, u32), color: ColorType, quality: Option<u8>) -> rimg_info {
     rimg_info {
         input_format: format.bit(),
         width,
         height,
         has_alpha: color.has_alpha() as u8,
+        input_jpeg_quality: quality.unwrap_or(0),
     }
+}
+
+/// The quality the input was written with, for a JPEG; see `quality.rs` for what that means.
+fn input_quality(format: Format, input: &[u8]) -> Option<u8> {
+    (format == Format::Jpeg)
+        .then(|| quality::estimate(input))
+        .flatten()
 }
 
 /// What the header says, and nothing about the data behind it.
@@ -150,7 +161,12 @@ pub fn probe(input: &[u8]) -> Result<rimg_info, Error> {
     let decoder = ImageReader::with_format(Cursor::new(input), format.image_format())
         .into_decoder()
         .map_err(decode_error)?;
-    Ok(info(format, decoder.dimensions(), decoder.color_type()))
+    Ok(info(
+        format,
+        decoder.dimensions(),
+        decoder.color_type(),
+        input_quality(format, input),
+    ))
 }
 
 pub fn reencode(cfg: &Config, input: &[u8]) -> Result<(Vec<u8>, rimg_info), Error> {
@@ -158,6 +174,15 @@ pub fn reencode(cfg: &Config, input: &[u8]) -> Result<(Vec<u8>, rimg_info), Erro
     if cfg.input_formats & format.bit() == 0 {
         return Err(Error::Unsupported);
     }
+
+    // Never a higher quality than the picture came in with: it would store the input's
+    // artifacts more precisely and nothing else.
+    let input_quality = input_quality(format, input);
+    let mut cfg = *cfg;
+    if let (true, Some(quality)) = (cfg.jpeg_quality_from_input, input_quality) {
+        cfg.jpeg_quality = cfg.jpeg_quality.min(quality);
+    }
+    let cfg = &cfg;
 
     let mut limits = Limits::no_limits();
     limits.max_image_width = cfg.max_width;
@@ -235,7 +260,7 @@ pub fn reencode(cfg: &Config, input: &[u8]) -> Result<(Vec<u8>, rimg_info), Erro
         Format::WebP => Err(Error::InvalidArgument),
     }?;
 
-    Ok((out, info(format, size, color)))
+    Ok((out, info(format, size, color, input_quality)))
 }
 
 /// Not image-rs's own JPEG encoder: that one stores color at full resolution and uses the

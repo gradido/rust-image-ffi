@@ -15,6 +15,18 @@ output  what a given input turns into: which pictures are refused, and the bytes
 build   what the prebuild archive holds and what the caller's link line needs.
 ```
 
+## 0.2.1
+
+- **ABI** Two fields more, each in a byte that was padding, so neither struct changed its size:
+  `rimg_info.input_jpeg_quality`, the quality a JPEG came in with (0 for anything else), and
+  `rimg_options.jpeg_quality_from_input`, non-zero by default. `rimg_info` stays frozen at 16
+  bytes.
+- **output** **A JPEG is no longer encoded at a higher quality than it came in with.** With the
+  defaults, `jpeg_quality` is now the highest quality used: a JPEG of quality 60 comes out at 60,
+  not at 85, and a quarter smaller for it. `jpeg_quality_from_input = 0` is the old behavior.
+  PNG and WebP input, and PNG output, are unchanged.
+- **build** unchanged.
+
 ## 0.2.0
 
 - **ABI** One field more at the end of `rimg_options`: `jpeg_subsampling`, non-zero by default.
